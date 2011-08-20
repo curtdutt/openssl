@@ -24,34 +24,23 @@
   
   (define listener (ssl-listen 8443 4 #f #f server-context))
   
-  #|
-(define server-thread 
-  (thread (λ ()
-            (let loop ()
-              ;(printf "serving!~n")
-              (let-values ([(in out) (ssl-accept listener)])
-                (let ([n (read in)])
-                  (printf "server accepted ~a~n" n)
-                  (write n out))
-                (close-input-port in)
-                (close-output-port out))
-              ))))
-              ;(loop)))))|#
   
-  (let-values ([(in out) (ssl-accept listener)])
-    (let ([n (read in)])
-      (close-input-port in)
-      (printf "server accepted ~a~n" n)
-      (write n out)
-      (close-output-port out))))
+  (define server-thread 
+    (thread (λ ()
+              (let loop ()
+                (printf "serving!~n")
+                (let-values ([(in out) (ssl-accept listener)])
+                  (let ([n (read in)])
+                    (printf "server accepted ~a~n" n)
+                    (write n out))
+                  (close-input-port in)
+                  (close-output-port out))
+                (loop)))))
+  #t)
+  
   
 (parameterize ([current-custodian main-cust])
   (test))
-
-(sleep 2)
-(custodian-shutdown-all main-cust)
-
-(collect-garbage)
 
 ;(current-custodian main-cust)
 

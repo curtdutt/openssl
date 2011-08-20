@@ -1,10 +1,10 @@
 #lang racket
 
-(require openssl)
-;(require "mzssl.rkt")
+;(require openssl)
+(require "mzssl.rkt")
 
 (define client-context (ssl-make-client-context))
-(ssl-load-certificate-chain! client-context "test.pem")
+;(ssl-load-certificate-chain! client-context "test.pem")
 (ssl-load-private-key! client-context "test.pem")
 
 
