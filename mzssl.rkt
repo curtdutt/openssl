@@ -1,18 +1,4 @@
 #lang racket/base
-;; Disabled when `enforce-retry?' is #f:
-;;  Warn clients: when a (non-blocking) write fails to write all the
-;;   data, the stream is actually committed to writing the given data
-;;   in the future. (This requirement comes from the SSL library.)
-
-;; Another warning: data that is written and not buffered may still be
-;;  in flight between Racket and the underlying ports. A `flush-output'
-;;  won't return until sent data is actually in the underlying port.
-;;  (This is due to the fact that unbuffered data cannot be written
-;;  without blocking.)
-
-;; One last warning: a write/read must block because a previous
-;;  read/write (the opposite direction) didn't finish, and so that
-;;  opposite must be completed, first.
 
 (require ffi/unsafe
          ffi/unsafe/define
@@ -41,7 +27,7 @@
          
          ssl-set-verify!
          
-         ;sets the ssl server to try an verify certificates
+         ;sets the ssl server to attempt verification of certificates
          ;it does not require verification though.
          ssl-try-verify!
          
@@ -249,7 +235,7 @@
 ;; constructs and raises the exception to `escape-atomic'.
 
 (define in-atomic? (make-parameter #f))
-(define-struct (exn:atomic exn) (thunk))
+(struct exn:atomic exn (thunk))
 
 (define-syntax atomically
   (syntax-rules ()
@@ -266,7 +252,7 @@
 
 (define (escape-atomic thunk)
   (if (in-atomic?)
-      (raise (make-exn:atomic 
+      (raise (exn:atomic 
               "error during atomic..."
               (current-continuation-marks)
               thunk))
@@ -276,21 +262,21 @@
 ;; Structs
 
 ;TODO: remove define struct
-(define-struct ssl-context (ctx))
-(define-struct (ssl-client-context ssl-context) ())
-(define-struct (ssl-server-context ssl-context) ())
+(struct ssl-context (ctx))
+(struct ssl-client-context ssl-context ())
+(struct ssl-server-context ssl-context ())
 
-(define-struct ssl-listener (l mzctx)
+(struct ssl-listener (l mzctx)
   #:property prop:evt (lambda (lst) (wrap-evt (ssl-listener-l lst) 
                                               (lambda (x) lst))))
 
 
 (struct ssl-port (mzssl))
 
-(define-struct (ssl-input-port ssl-port) (port)
+(struct ssl-input-port ssl-port (port)
   #:property prop:input-port (struct-field-index port))
 
-(define-struct (ssl-output-port ssl-port) (port)
+(struct ssl-output-port ssl-port (port)
   #:property prop:output-port (struct-field-index port))
 
 ;; internal:
@@ -375,7 +361,7 @@
          [ctx (make-SSL_CTX who meth)])
     (SSL_CTX_set_mode ctx (bitwise-ior SSL_MODE_ENABLE_PARTIAL_WRITE
                                        SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER))   
-    ((if client? make-ssl-client-context make-ssl-server-context) ctx)))
+    ((if client? ssl-client-context ssl-server-context) ctx)))
 
 (define (ssl-make-client-context [protocol-symbol default-encrypt])
   (make-context 'ssl-make-client-context protocol-symbol "" #t))
@@ -550,29 +536,29 @@
     ;when the application closes its output port
     ;the pump thread must be notified of this
     
-    (values (make-ssl-input-port mzssl (make-input-port
-                                        'ssl-input-port
-                                        (λ (b)
-                                          clear-to-pipe-in)
-                                        #f
-                                        (λ ()
-                                          (close-input-port clear-to-pipe-in)
-                                          (thread-send ssl-pump-thread 'input-port-closed #f))))
+    (values (ssl-input-port mzssl (make-input-port
+                                   'ssl-input-port
+                                   (λ (b)
+                                     clear-to-pipe-in)
+                                   #f
+                                   (λ ()
+                                     (close-input-port clear-to-pipe-in)
+                                     (thread-send ssl-pump-thread 'input-port-closed #f))))
             
-            (make-ssl-output-port mzssl (make-output-port
-                                         'ssl-output-port
-                                         clear-from-pipe-out
-                                         (λ (bstr start end non-block? breakable?)
-                                           ((cond [non-block? write-bytes-avail*]
-                                                  [breakable? write-bytes-avail/enable-break]
-                                                  [else write-bytes-avail])
-                                            bstr 
-                                            clear-from-pipe-out 
-                                            start 
-                                            end))
-                                         (λ ()
-                                           (close-output-port clear-from-pipe-out)
-                                           (flush-ssl ssl-pump-thread)))))))
+            (ssl-output-port mzssl (make-output-port
+                                    'ssl-output-port
+                                    clear-from-pipe-out
+                                    (λ (bstr start end non-block? breakable?)
+                                      ((cond [non-block? write-bytes-avail*]
+                                             [breakable? write-bytes-avail/enable-break]
+                                             [else write-bytes-avail])
+                                       bstr 
+                                       clear-from-pipe-out 
+                                       start 
+                                       end))
+                                    (λ ()
+                                      (close-output-port clear-from-pipe-out)
+                                      (flush-ssl ssl-pump-thread)))))))
 
 
 
@@ -896,7 +882,7 @@
                   (make-context 'ssl-listen protocol-symbol-or-context
                                 "server context, " #f))]
          [l (tcp-listen port-k queue-k reuse? hostname-or-#f)])
-    (make-ssl-listener l ctx)))
+    (ssl-listener l ctx)))
 
 (define (ssl-close l)
   (unless (ssl-listener? l)
