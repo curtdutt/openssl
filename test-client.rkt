@@ -18,4 +18,4 @@
 
             
                                 
-(send "hello")
+(send "hello there my good friendly doctor")
