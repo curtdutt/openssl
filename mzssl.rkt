@@ -195,6 +195,8 @@
 ;; has an implicitation for clients as noted at the top of this file.
 (define enforce-retry? #f)
 
+
+
 ;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Error handling
 
@@ -527,16 +529,12 @@
                           (error/ssl who "~a failed (input terminated prematurely)"
                                      (if connect? "connect" "accept"))))
     
-    
-    ;when the application closes its output port
-    ;the pump thread must be notified of this
-    
     (values (ssl-input-port mzssl (make-input-port
                                    'ssl-input-port
                                    (λ (bstr)
                                      (let ([result (read-bytes-avail!* bstr clear-to-pipe-in)])
                                        (if (equal? result 0)
-                                           (read-bytes-evt 1 clear-to-pipe-in)
+                                           clear-to-pipe-in
                                            result)))
                                    (λ (bstr skip evt)
                                      (peek-bytes-avail! bstr skip evt clear-to-pipe-in))
@@ -572,11 +570,6 @@
 
 
 
-
-
-
-
-
 ;pumps data between the pipes, ssl, memory bios, etc...
 (define (ssl-pump ssl-context ;ssl connection context this input-pump belongs to
                   cypher-port-in ;comes in from the other side of the connection
@@ -586,8 +579,8 @@
                   close-original? ;close down the original input and output ports when the ssl operation ends
                   connect) ;connect or accept connection
 
-  ;this is volatile and can be used at anytime
-  ;this is not preserved
+  ;this is volatile in the sense that it is used in
+  ;3 or 4 different places and will be overwritten between iterations of the loop
   (define xfer-buffer (make-immobile-bytes BUFFER-SIZE))
   
   ;the bio that SSL_read reads from
