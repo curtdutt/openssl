@@ -492,7 +492,6 @@
                                         connect/accept)])]
          [ctx (get-context who context-or-encrypt-method (eq? connect/accept 'connect))]
          [ssl (make-SSL who ctx)])
-    ;; Return SSL and the cancel boxL:
     (values ssl error connect?)))
 
 (define (wrap-ports who i o context-or-encrypt-method connect/accept close? error/ssl)
