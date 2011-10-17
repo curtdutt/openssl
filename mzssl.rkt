@@ -1,6 +1,7 @@
 #lang racket/base
 
-(require ffi/unsafe
+(require (for-syntax racket/base)
+         ffi/unsafe
          ffi/unsafe/define
          ffi/unsafe/atomic
          racket/port
@@ -196,6 +197,18 @@
 (define enforce-retry? #f)
 
 
+;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Debug logging for development purposes
+
+(define-for-syntax enable-ssl-logging #f)
+
+(define-syntax (log-ssl stx)
+  (if enable-ssl-logging
+      (syntax-case stx ()
+        [(_ stx ...)
+         #'(log-debug (format stx ...))])
+      #'(void)))
+
 
 ;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Error handling
@@ -279,7 +292,6 @@
 (struct ssl-output-port ssl-port (clear-port)
   #:property prop:output-port (struct-field-index clear-port))
 
-
 (define (make-immobile-bytes n)
   (if 3m?
       ;; Allocate the byte string via malloc:
@@ -287,8 +299,9 @@
        (let* ([p (malloc 'raw n)]
               [s (make-sized-byte-string p n)])
          (register-finalizer s (lambda (v)
-                                 (log-debug (format "openssl(~a): freed imobile bytes" (current-ssl-connection-id)))
+                                 (log-ssl "openssl: freed immobile bytes")
                                  (free p)))
+         (log-ssl "openssl: made immobile bytes")
          s))
       (make-bytes n)))
 
@@ -298,9 +311,9 @@
    (let ([ctx (SSL_CTX_new meth)])
      (check-valid ctx who "context creation")
      (register-finalizer ctx (lambda (v)
-                               (log-debug (format "openssl(~a): freed ssl context" (current-ssl-connection-id)))
+                               (log-ssl "openssl: freed ssl context")
                                (SSL_CTX_free v)))
-     (log-debug (format "openssl(~a): made ssl context" (current-ssl-connection-id)))
+     (log-ssl "openssl: made ssl context")
      ctx)))
 
 (define (make-SSL who ctx)
@@ -309,20 +322,21 @@
      (check-valid ssl who "make-SSL")
      (register-finalizer ssl
                          (lambda (v)
-                           (log-debug (format "openssl(~a): freed ssl" (current-ssl-connection-id)))
-                           (SSL_free ssl)))
-     (log-debug (format "openssl(~a): made ssl" (current-ssl-connection-id)))
+                           (log-ssl "openssl: freed ssl")
+                           (SSL_free v)))
+     (log-ssl "openssl: made ssl")
      ssl)))
 
 
+;TODO, make cancel box to ensure mem-bios get freed
 (define (make-mem-bio who)
   (atomically
    (let ([bio (BIO_new (BIO_s_mem))])
      (check-valid bio who "make-mem-bio")
      #|(register-finalizer bio (lambda (v)
                                (log-debug (format "openssl(~a): freed mem bio" (current-ssl-connection-id)))
-                               (BIO_free v)))
-     (log-debug (format "openssl(~a): made mem bio" (current-ssl-connection-id)))|#
+                               (BIO_free v)))|#
+     (log-ssl "openssl: made mem bio")
      bio)))
 
 
@@ -466,7 +480,7 @@
         [dead-evt (thread-dead-evt thd)])
     (thread-send thd (cons message channel) #f)
     (let ([result (sync channel dead-evt)])
-      ;(log-debug (format "pump-thread-notify result ~v" result))
+      (log-ssl "pump-thread-notify result ~v" result)
       (if (equal? result dead-evt)
           (fail-thunk)
           result))))
@@ -532,7 +546,7 @@
                           (error/ssl who "~a failed to connect"
                                      (if connect? "connect" "accept"))))
     
-    (log-debug (format "openssl(~a): created connection" (current-ssl-connection-id)))
+    (log-ssl "openssl: new connection established")
     (values (ssl-input-port ssl 
                             ssl-pump-thread 
                             i 
@@ -546,7 +560,7 @@
                              (λ (bstr skip evt)
                                (peek-bytes-avail! bstr skip evt clear-to-pipe-in))
                              (λ ()
-                               (log-debug (format "ssl-port(~a): input port closed" (current-ssl-connection-id)))
+                               (log-ssl "ssl-port: input port closed")
                                (close-input-port clear-to-pipe-in)
                                (thread-send ssl-pump-thread 'input-port-closed #f))
                              (λ ()
@@ -576,7 +590,7 @@
                                  start 
                                  end))
                               (λ ()
-                                (log-debug (format "ssl-port(~a): output port closed" (current-ssl-connection-id)))
+                                (log-ssl "ssl-port: output port closed")
                                 (close-output-port clear-from-pipe-out)
                                 (flush-ssl ssl-pump-thread)))))))
 
@@ -611,8 +625,8 @@
     (when close-original? 
       (close-input-port cypher-port-in)
       (close-output-port cypher-port-out)
-      (log-debug (format "ssl-pump(~a): closed original ports" (current-ssl-connection-id))))
-    (log-debug (format "ssl-pump(~a): halted" (current-ssl-connection-id)))
+      (log-ssl "ssl-pump: closed original ports"))
+    (log-ssl "ssl-pump: halted")
     (kill-thread (current-thread)))
   
   
@@ -649,7 +663,7 @@
           [state-ssl-state-string (SSL_state_string ssl-context)]
           [state-pending-flush-count (length flushes)])
     
-      #|(log-debug (format "ssl-pump: entering loop: clear-port-in:(~v) clear-port-out:(~v) cypher-port-in:(~v) write-bio bytes:(~v) read-bio bytes:(~v) state:(~v) ssl_state:(~v) flushes-pending:(~v)"
+      (log-ssl "ssl-pump: entering loop: clear-port-in:(~v) clear-port-out:(~v) cypher-port-in:(~v) write-bio bytes:(~v) read-bio bytes:(~v) state:(~v) ssl_state:(~v) flushes-pending:(~v)"
                          state-clear-port-in
                          state-clear-port-out
                          state-cypher-port-in
@@ -657,7 +671,7 @@
                          state-bio-read-bytes
                          state-ssl-error
                          state-ssl-state-string
-                         state-pending-flush-count))|#
+                         state-pending-flush-count)
     
     ;from here we are going to determine what to do next
     ;we operate as a great big state machine depending upon what events occur
@@ -666,14 +680,14 @@
      ;exit out if something bad happened
      [(when (or (equal? state SSL_ERROR_SSL)
                 (equal? state SSL_ERROR_SYSCALL)))
-      (log-debug (format "ssl-pump(~a): error ~v. exiting." (current-ssl-connection-id) state))
+      (log-debug (format "ssl-pump: error ~v. exiting." state))
       (halt)]
      
      
      ;if we are in state SSL_ERROR_ZERO_RETURN
      ;it means an SSL shutdown has occured cleanly and we can exit
      [(when (equal? state SSL_ERROR_ZERO_RETURN))
-      (log-debug (format "ssl-pump(~a): connection closed" (current-ssl-connection-id)))
+      (log-ssl "ssl-pump: connection closed")
       (halt)]
      
      ;check the write bio for any info that must be pumped out
@@ -683,8 +697,7 @@
       (let ([written (BIO_read write-bio xfer-buffer BUFFER-SIZE)])
         (write-bytes xfer-buffer cypher-port-out 0 written)
         (flush-output cypher-port-out)
-        ;(log-debug (format "ssl-pump: wrote ~v bytes cyphertext to cypher out" written))
-        )
+        (log-ssl "ssl-pump: wrote ~v bytes cyphertext to cypher out" written))
       (main-loop state abandon-port? flushes connect-channel)]
      
      ;if there are any bytes in the read bio that need unencoded
@@ -696,7 +709,7 @@
                        (begin
                          (write-bytes xfer-buffer clear-port-out 0 ssl-count)
                          (flush-output clear-port-out)
-                         ;(log-debug (format "ssl-pump: wrote ~v bytes to clear-port-out" ssl-count))
+                         (log-ssl "ssl-pump: wrote ~v bytes to clear-port-out" ssl-count)
                          SSL_ERROR_NONE)
                        
                        ;we failed to write data, something could have happend
@@ -718,18 +731,18 @@
             (begin
               ;if we get an eof, it means the output port
               ;on the clear side was closed by the application
-              (log-debug (format "ssl-pump(~a): clear-port-in closed" (current-ssl-connection-id)))
+              (log-ssl "ssl-pump: clear-port-in closed")
               (close-input-port clear-port-in)
               (main-loop state  
                          abandon-port?
                          flushes
                          connect-channel))
             (let ([ssl-count (SSL_write ssl-context xfer-buffer in-count)])
-              ;(log-debug (format "ssl-pump: read ~a bytes from clear-port-in" in-count))
+              (log-ssl "ssl-pump: read ~a bytes from clear-port-in" in-count)
               ;the write succeeded, we can remove the peeked bytes from clear-port-in
               ;that we previously peeked
               (port-commit-peeked ssl-count progress always-evt clear-port-in)
-              ;(log-debug (format "ssl-pump: SSL_write: wrote ~a bytes to ssl" ssl-count))
+              (log-ssl "ssl-pump: SSL_write: wrote ~a bytes to ssl" ssl-count)
               (main-loop (if (> ssl-count 0) SSL_ERROR_NONE (SSL_get_error ssl-context ssl-count))
                          abandon-port?
                          flushes
@@ -744,14 +757,14 @@
             (begin
               ;if eof is returned on the input port
               ;we can never proceed further and halt
-              (log-debug (format "ssl-pump(~a): cypher-port-in closed - shutting down" (current-ssl-connection-id)))
+              (log-ssl "ssl-pump(~a): cypher-port-in closed - shutting down")
               (close-input-port cypher-port-in)
               (halt))
             (let ([bio-count (BIO_write read-bio xfer-buffer in-count)])
               (unless (= in-count bio-count)
                 (error 'input-pump "ssl-pump: Bio write seemed to fail!"))
 
-              ;(log-debug (format "ssl-pump: read ~a bytes from cypher-port-in" in-count))
+              (log-ssl "ssl-pump: read ~a bytes from cypher-port-in" in-count)
               
               (main-loop state abandon-port? flushes connect-channel))))]
         
@@ -773,15 +786,15 @@
                  (not (eq? state-cypher-port-in 'ready))
                  (not (or (equal? state SSL_ERROR_WANT_READ) (equal? state SSL_ERROR_WANT_WRITE)))))
       (let ([result (SSL_shutdown ssl-context)])
-        (log-debug (format "ssl-pump(~a): ssl-shudown result ~v" (current-ssl-connection-id) result))
+        (log-ssl "ssl-pump: ssl-shudown result ~v" result)
         (cond [(equal? result 1)
-               (log-debug (format "ssl-pump(~a): ssl shutdown successful" (current-ssl-connection-id)))
+               (log-ssl "ssl-pump: ssl shutdown successful")
                (halt)]
               [(equal? result 0)
-               (log-debug (format "ssl-pump(~a): ssl shutdown pending" (current-ssl-connection-id)))
+               (log-ssl "ssl-pump: ssl shutdown pending")
                (main-loop state abandon-port? flushes #f)]
               [else
-               (log-debug (format "ssl-pump(~a): ssl shutdown not finished" (current-ssl-connection-id)))
+               (log-ssl "ssl-pump: ssl shutdown not finished")
                (main-loop (SSL_get_error ssl-context result)
                           abandon-port?
                           flushes
@@ -790,7 +803,7 @@
      ;when ssl goes SSL_OK
      ;we can now notify the thread waiting on us to completed the connection
      [(when (and connect-channel (equal? (SSL_state ssl-context) SSL_OK)))
-      ;(log-debug "ssl-pump: sent connection ok to waiting connect")
+      (log-ssl "ssl-pump: sent connection ok to waiting connect")
       (channel-put connect-channel 'ok)
       (main-loop state abandon-port? flushes #f)]
      
@@ -802,10 +815,9 @@
                  (= state-bio-write-bytes 0)))
       (for-each (λ (flush-channel)
                   (channel-put flush-channel 'ok)
-                  ;(log-debug (format "ssl-pump: sent 'ok to flush channel ~v" flush-channel))
-                  )
+                  (log-ssl "ssl-pump: sent 'ok to flush channel ~v" flush-channel))
                 flushes)
-      ;(log-debug "ssl-pump: flush completed")
+      (log-ssl "ssl-pump: flush completed")
       (main-loop state abandon-port? empty connect-channel)]
      
      
@@ -813,20 +825,20 @@
       ;since the application closed its input port, we will no longer
       ;be able to send anything to it, we can close our output port
       (close-output-port clear-port-out)
-      (log-debug (format "ssl-pump(~a): received message: input-port-closed" (current-ssl-connection-id)))
+      (log-ssl "ssl-pump: received message: input-port-closed")
       (main-loop state abandon-port? flushes connect-channel)]
      
      [(cons 'abandon abandon-channel)
-      (log-debug (format "ssl-pump(~a): received message: abandon-port" (current-ssl-connection-id)))
+      (log-ssl "ssl-pump: received message: abandon-port")
       (channel-put abandon-channel 'ok)
       (main-loop state #t flushes connect-channel)]
      
      [(cons 'flush flush-channel)
-      ;(log-debug "ssl-pump: received flush message")
+      (log-ssl "ssl-pump: received flush message")
       (main-loop state abandon-port? (cons flush-channel flushes) connect-channel)]
      
      [(cons 'connect connect-channel)
-      ;(log-debug "ssl-pump: receive connect message")
+      (log-ssl "ssl-pump: receive connect message")
       (main-loop state abandon-port? flushes connect-channel)]))))
 
 
