@@ -200,7 +200,7 @@
 ;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Debug logging for development purposes
 
-(define-for-syntax enable-ssl-logging #f)
+(define-for-syntax enable-ssl-logging #t)
 
 (define-syntax (log-ssl stx)
   (if enable-ssl-logging
@@ -757,7 +757,7 @@
             (begin
               ;if eof is returned on the input port
               ;we can never proceed further and halt
-              (log-ssl "ssl-pump(~a): cypher-port-in closed - shutting down")
+              (log-ssl "ssl-pump: cypher-port-in closed - shutting down")
               (close-input-port cypher-port-in)
               (halt))
             (let ([bio-count (BIO_write read-bio xfer-buffer in-count)])
