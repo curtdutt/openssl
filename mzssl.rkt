@@ -200,7 +200,7 @@
 ;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Debug logging for development purposes
 
-(define-for-syntax enable-ssl-logging #t)
+(define-for-syntax enable-ssl-logging #f)
 
 (define-syntax (log-ssl stx)
   (if enable-ssl-logging
