@@ -553,23 +553,29 @@
                             (make-input-port
                              'ssl-input-port
                              (λ (bstr)
+                               (log-ssl "ssl-port: read")
                                (let ([result (read-bytes-avail!* bstr clear-to-pipe-in)])
                                  (if (equal? result 0)
-                                     clear-to-pipe-in
+                                     (wrap-evt clear-to-pipe-in (λ (x) x))
                                      result)))
                              (λ (bstr skip evt)
+                               (log-ssl "ssl-port: peek")
                                (peek-bytes-avail! bstr skip evt clear-to-pipe-in))
                              (λ ()
                                (log-ssl "ssl-port: input port closed")
                                (close-input-port clear-to-pipe-in)
                                (thread-send ssl-pump-thread 'input-port-closed #f))
                              (λ ()
+                               (log-ssl "ssl-port: progres-evt")
                                (port-progress-evt clear-to-pipe-in))
                              (λ (amt progress evt)
+                               (log-ssl "ssl-port: commit-peekded")
                                (port-commit-peeked amt progress evt))
                              (λ ()
+                               (log-ssl "ssl-port: get-location")
                                (port-next-location clear-to-pipe-in))
                              (λ ()
+                               (log-ssl "ssl-port: count-lines!")
                                (port-count-lines! clear-to-pipe-in))
                              1
                              (case-lambda [() (file-stream-buffer-mode clear-to-pipe-in)]
