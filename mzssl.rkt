@@ -512,16 +512,13 @@
     (values ssl error connect?)))
 
 
-(define current-ssl-connection-id (make-parameter #f))
-
 (define (wrap-ports who i o context-or-encrypt-method connect/accept close? error/ssl)
   (unless (input-port? i)
     (raise-type-error who "input port" i))
+  
   (unless (output-port? o)
     (raise-type-error who "output port" o))
-  
-  (current-ssl-connection-id (random 4294967087))
-  
+    
   ;ssl-context ;ssl connection context this input-pump belongs to
   ;read-bio ;the bio that SSL_read reads from
   ;write-bio ;the bio that SSL_write writes to
@@ -537,15 +534,17 @@
                                              (ssl-pump ssl i o clear-from-pipe-in clear-to-pipe-out close? (if connect? SSL_connect SSL_accept))))])
     
     
-    ;TODO: need to capture when the application closes its output port
-    ;we know when the input port is closed, because we eventually get an EOF on the out side
-    
-    
-    (pump-thread-notify ssl-pump-thread 'connect 
-                        (λ ()
-                          (error/ssl who "~a failed to connect"
-                                     (if connect? "connect" "accept"))))
-    
+    ;if a break occurs while we are waiting on the connection to complete
+    ;we can just exit out. 
+    ;it is assumed that the ports will be closed by external code 
+    ;if the break occurs here
+    (parameterize-break 
+     #t
+     (pump-thread-notify ssl-pump-thread 'connect 
+                         (λ ()
+                           (error/ssl who "~a failed to connect"
+                                      (if connect? "connect" "accept")))))
+     
     (log-ssl "openssl: new connection established")
     (values (ssl-input-port ssl 
                             ssl-pump-thread 
@@ -889,38 +888,41 @@
 ;; SSL accept
 
 (define (do-ssl-accept who tcp-accept ssl-listener)
-  (log-ssl "openssl: accepting connection")
-  (let-values ([(i o) (tcp-accept (ssl-listener-l ssl-listener))])
-    ;; Obviously, there's a race condition between accepting the
-    ;; connections and installing the exception handler below. However,
-    ;; if breaks are enabled, then i and o could get lost between
-    ;; the time that tcp-accept returns and `i' and `o' are bound,
-    ;; anyway. So we can assume that breaks are enabled without loss
-    ;; of (additional) resources.
-    (with-handlers ([void (lambda (exn)
-                            (close-input-port i)
-                            (close-output-port o)
-                            (raise exn))])
-      (log-ssl "openssl: wrapping ports")
-      (wrap-ports who i o (ssl-listener-mzctx ssl-listener) 'accept #t error/network))))
+  ;here we disable breaks until the connection is set up
+  ;wrap-ports is break aware in case a break happens
+  (parameterize-break
+   #f
+   (let-values ([(i o) (tcp-accept (ssl-listener-l ssl-listener))])
+     (with-handlers ([void (lambda (exn)
+                             (close-input-port i)
+                             (close-output-port o)
+                             (raise exn))])
+       (log-ssl "openssl: wrapping ports")
+       (wrap-ports who i o (ssl-listener-mzctx ssl-listener) 'accept #t error/network)))))
 
 (define (ssl-accept ssl-listener)
+  (log-ssl "openssl: accepting connection")
   (do-ssl-accept 'ssl-accept tcp-accept ssl-listener))
 
 (define (ssl-accept/enable-break ssl-listener)
+  (log-ssl "openssl: accepting connection/enable-break")
   (do-ssl-accept 'ssl-accept/enable-break tcp-accept/enable-break ssl-listener))
 
 ;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; SSL connect
 
 (define (do-ssl-connect who tcp-connect hostname port-k client-context-or-protocol-symbol)
-  (let-values ([(i o) (tcp-connect hostname port-k)])
-    ;; See do-ssl-accept for note on race condition here:
-    (with-handlers ([void (lambda (exn)
-                            (close-input-port i)
-                            (close-output-port o)
-                            (raise exn))])
-      (wrap-ports who i o client-context-or-protocol-symbol 'connect #t error/network))))
+  ;here we disable breaks until the connection is set up
+  ;wrap-ports is break aware in case a break happens
+  (parameterize-break 
+   #f
+   (let-values ([(i o) (tcp-connect hostname port-k)])
+     ;; See do-ssl-accept for note on race condition here:
+     (with-handlers ([void (lambda (exn)
+                             (close-input-port i)
+                             (close-output-port o)
+                             (raise exn))])
+       (wrap-ports who i o client-context-or-protocol-symbol 'connect #t error/network)))))
 
 (define (ssl-connect
          hostname port-k
