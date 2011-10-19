@@ -553,33 +553,16 @@
                             (make-input-port
                              'ssl-input-port
                              (λ (bstr)
-                               (log-ssl "ssl-port: read")
                                (let ([result (read-bytes-avail!* bstr clear-to-pipe-in)])
                                  (if (equal? result 0)
                                      (wrap-evt clear-to-pipe-in (λ (x) x))
                                      result)))
-                             (λ (bstr skip evt)
-                               (log-ssl "ssl-port: peek")
-                               (peek-bytes-avail! bstr skip evt clear-to-pipe-in))
+                             #f
                              (λ ()
                                (log-ssl "ssl-port: input port closed")
                                (close-input-port clear-to-pipe-in)
-                               (thread-send ssl-pump-thread 'input-port-closed #f))
-                             (λ ()
-                               (log-ssl "ssl-port: progres-evt")
-                               (port-progress-evt clear-to-pipe-in))
-                             (λ (amt progress evt)
-                               (log-ssl "ssl-port: commit-peekded")
-                               (port-commit-peeked amt progress evt))
-                             (λ ()
-                               (log-ssl "ssl-port: get-location")
-                               (port-next-location clear-to-pipe-in))
-                             (λ ()
-                               (log-ssl "ssl-port: count-lines!")
-                               (port-count-lines! clear-to-pipe-in))
-                             1
-                             (case-lambda [() (file-stream-buffer-mode clear-to-pipe-in)]
-                                          [(mode) (file-stream-buffer-mode clear-to-pipe-in mode)])))
+                               (thread-send ssl-pump-thread 'input-port-closed #f))))
+                             
             
             (ssl-output-port ssl 
                              ssl-pump-thread 
@@ -893,17 +876,20 @@
                   (make-context 'ssl-listen protocol-symbol-or-context
                                 "server context, " #f))]
          [l (tcp-listen port-k queue-k reuse? hostname-or-#f)])
+    (log-ssl "openssl: listening on port ~a" port-k)
     (ssl-listener l ctx)))
 
 (define (ssl-close l)
   (unless (ssl-listener? l)
     (raise-type-error 'ssl-close "SSL listener" l))
+  (log-ssl "openssl: closed listener")
   (tcp-close (ssl-listener-l l)))
 
 ;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; SSL accept
 
 (define (do-ssl-accept who tcp-accept ssl-listener)
+  (log-ssl "openssl: accepting connection")
   (let-values ([(i o) (tcp-accept (ssl-listener-l ssl-listener))])
     ;; Obviously, there's a race condition between accepting the
     ;; connections and installing the exception handler below. However,
@@ -915,6 +901,7 @@
                             (close-input-port i)
                             (close-output-port o)
                             (raise exn))])
+      (log-ssl "openssl: wrapping ports")
       (wrap-ports who i o (ssl-listener-mzctx ssl-listener) 'accept #t error/network))))
 
 (define (ssl-accept ssl-listener)
