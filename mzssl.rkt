@@ -889,7 +889,6 @@
 ;; SSL accept
 
 (define (do-ssl-accept who tcp-accept ssl-listener)
-  (raise 'oops)
   (log-ssl "openssl: accepting connection")
   (let-values ([(i o) (tcp-accept (ssl-listener-l ssl-listener))])
     ;; Obviously, there's a race condition between accepting the
