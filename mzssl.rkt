@@ -200,7 +200,7 @@
 ;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Debug logging for development purposes
 
-(define-for-syntax enable-ssl-logging #t)
+(define-for-syntax enable-ssl-logging #f)
 
 (define-syntax (log-ssl stx)
   (if enable-ssl-logging
@@ -283,7 +283,6 @@
   #:property prop:evt (lambda (lst) (wrap-evt (ssl-listener-l lst) 
                                               (lambda (x) lst))))
 
-
 (struct ssl-port (ssl pump cypher-port))
 
 (struct ssl-input-port ssl-port (clear-port)
@@ -333,9 +332,8 @@
   (atomically
    (let ([bio (BIO_new (BIO_s_mem))])
      (check-valid bio who "make-mem-bio")
-     #|(register-finalizer bio (lambda (v)
-                               (log-debug (format "openssl(~a): freed mem bio" (current-ssl-connection-id)))
-                               (BIO_free v)))|#
+     ;no finalizer needs registered
+     ;the SSL library will free these when SSL shutdown is called
      (log-ssl "openssl: made mem bio")
      bio)))
 
@@ -519,24 +517,22 @@
   (unless (output-port? o)
     (raise-type-error who "output port" o))
     
-  ;ssl-context ;ssl connection context this input-pump belongs to
-  ;read-bio ;the bio that SSL_read reads from
-  ;write-bio ;the bio that SSL_write writes to
-  ;cypher-port-in ;comes in from the other side of the connection
-  ;cypher-port-out ;goes over the wire to the other side of the connection
-  ;clear-port-in  ;data comes from the application over this
-  ;clear-port-out ;data goes out to the application over this
-  
   (let*-values ([(clear-from-pipe-in clear-from-pipe-out) (make-pipe)] ;pipes data in from the application
                 [(clear-to-pipe-in clear-to-pipe-out) (make-pipe)] ;pipes data out to the application
                 [(ssl cancel connect?) (create-ssl who context-or-encrypt-method connect/accept error/ssl)]
                 [(ssl-pump-thread) (thread (λ () 
-                                             (ssl-pump ssl i o clear-from-pipe-in clear-to-pipe-out close? (if connect? SSL_connect SSL_accept))))])
-    
+                                             (ssl-pump ssl ;ssl connection context this input-pump belongs to
+                                                       i ;comes in from the external side of the connection
+                                                       o ;goes out to the external side of the connection
+                                                       clear-from-pipe-in ;comes in from the application side
+                                                       clear-to-pipe-out ;goes out to the application side
+                                                       close? ;true if the original ports should be closed on shutdown
+                                                       (if connect? SSL_connect SSL_accept) ;connect or accept to be performed by the pump
+                                                       )))])
     
     ;if a break occurs while we are waiting on the connection to complete
     ;we can just exit out. 
-    ;it is assumed that the ports will be closed by external code 
+    ;it is assumed that the ports will be closed by the pump (or external code)
     ;if the break occurs here
     (parameterize-break 
      #t
@@ -552,10 +548,7 @@
                             (make-input-port
                              'ssl-input-port
                              (λ (bstr)
-                               (let ([result (read-bytes-avail!* bstr clear-to-pipe-in)])
-                                 (if (equal? result 0)
-                                     (wrap-evt clear-to-pipe-in (λ (x) x))
-                                     result)))
+                               (wrap-evt clear-to-pipe-in (λ (x) x)))
                              #f
                              (λ ()
                                (log-ssl "ssl-port: input port closed")
