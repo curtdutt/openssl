@@ -317,7 +317,7 @@
    (let ([ctx (SSL_CTX_new meth)])
      (check-valid ctx who "context creation")
      (register-finalizer ctx (lambda (v)
-                               (log-ssl "openssl: freed ssl context (~a)" (cast ctx _pointer _intptr))
+                               (log-ssl "openssl: freed ssl context (~a)" (cast v _pointer _intptr))
                                (SSL_CTX_free v)))
      (log-ssl "openssl: made ssl context (~a)" (cast ctx _pointer _intptr))
      ctx)))
@@ -328,7 +328,7 @@
      (check-valid ssl who "make-SSL")
      (register-finalizer ssl
                          (lambda (v)
-                           (log-ssl "openssl: freed ssl (~a)" (cast ssl _pointer _intptr))
+                           (log-ssl "openssl: freed ssl (~a)" (cast v _pointer _intptr))
                            (SSL_free v)))
      (log-ssl "openssl: made ssl (~a)" (cast ssl _pointer _intptr))
      ssl)))
