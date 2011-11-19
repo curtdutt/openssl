@@ -485,7 +485,6 @@
         [dead-evt (thread-dead-evt thd)])
     (thread-send thd (cons message channel) #f)
     (let ([result (sync channel dead-evt)])
-      (log-ssl "pump-thread-notify result ~v" result)
       (if (equal? result dead-evt)
           (fail-thunk)
           result))))
@@ -523,8 +522,8 @@
     (raise-type-error who "output port" o))
   
   (let*-values ([(ssl cancel connect?) (create-ssl who context-or-encrypt-method connect/accept error/ssl)]
-                [(clear-from-pipe-in clear-from-pipe-out) (make-pipe)] ;pipes data in from the application
-                [(clear-to-pipe-in clear-to-pipe-out) (make-pipe)] ;pipes data out to the application
+                [(clear-from-pipe-in clear-from-pipe-out) (make-pipe BUFFER-SIZE)] ;pipes data in from the application
+                [(clear-to-pipe-in clear-to-pipe-out) (make-pipe BUFFER-SIZE)] ;pipes data out to the application
                 [(ssl-pump-thread) (thread (λ () 
                                              (ssl-pump ssl ;ssl connection context this input-pump belongs to
                                                        i ;comes in from the external side of the connection
@@ -544,8 +543,8 @@
      #t
      (pump-thread-notify ssl-pump-thread 'connect 
                          (λ ()
-                           (error/ssl who "~a failed to connect"
-                                      (if connect? "connect" "accept")))))
+                           (error/network who "~a failed to connect"
+                                          (if connect? "connect" "accept")))))
     
     (log-ssl "openssl (~a): new connection established" ssl-connection-id)
     (values (ssl-input-port ssl 
@@ -564,7 +563,9 @@
                              (λ ()
                                (log-ssl "ssl-port (~a): input port closed" ssl-connection-id)
                                (close-input-port clear-to-pipe-in)
-                               (thread-send ssl-pump-thread 'input-port-closed #f))))
+                               (pump-thread-notify ssl-pump-thread 'input-port-closed
+                                                   (λ ()
+                                                     (void))))))
             
             
             (ssl-output-port ssl 
@@ -574,6 +575,9 @@
                               'ssl-output-port
                               always-evt
                               (λ (bstr start end non-block? breakable?)
+                                (when (thread-dead? ssl-pump-thread)
+                                  (error/network 'ssl-output-port "ssl connection is closed"))
+                                
                                 ((cond [non-block? write-bytes-avail*]
                                        [breakable? write-bytes-avail/enable-break]
                                        [else write-bytes-avail])
@@ -584,8 +588,16 @@
                               (λ ()
                                 (log-ssl "ssl-port (~a): output port closed" ssl-connection-id)
                                 (close-output-port clear-from-pipe-out)
-                                (flush-ssl ssl-pump-thread)))))))
+                                (pump-thread-notify ssl-pump-thread 'output-port-closed
+                                                    (λ ()
+                                                      (void)))))))))
 
+
+(define (not-eof-evt port)                
+  (guard-evt (λ ()
+               (if (and (byte-ready? port) (equal? (peek-byte port) eof))
+                   never-evt
+                   port))))
 
 
 ;pumps data between the pipes, ssl, memory bios, etc...
@@ -617,41 +629,25 @@
   (connect ssl-context)
   
   
-  (let main-loop ([flushes empty] ;tracks any threads waiting on flushes
-                  [connect-channel #f]) ;tracks the thread that is waiting for a connection to complete
+  (let main-loop ([flushes empty] ;tracks any channels waiting on flushes to complete
+                  [shutdowns empty] ;tracks any channels waiting on a shutdown to complete
+                  [connect-channel #f] ;tracks the channel used by the thread that initiated the connection
+                  [app-input-closed #f] ;tracks if the input port on the application side was closed
+                  [app-output-closed #f]) ;tracks if the output port on the application side was closed
     
     (let ([state-clear-port-in (cond [(port-closed? clear-port-in)
                                       'closed]
                                      [(byte-ready? clear-port-in)
-                                      'ready]
+                                      (if (equal? (peek-byte clear-port-in) eof)
+                                          'eof
+                                          'ready)]
                                      [else
                                       'not-ready])]
-          [state-clear-port-out (cond [(port-closed? clear-port-out)
-                                       'closed]
-                                      [else
-                                       'open])]
-          [state-cypher-port-in (cond [(port-closed? cypher-port-in)
-                                      'closed]
-                                     [(byte-ready? cypher-port-in)
-                                      'ready]
-                                     [else
-                                      'not-ready])]
+          
           [state-bio-write-bytes (BIO_ctrl_pending write-bio)]
-          [state-bio-read-bytes (BIO_ctrl_pending read-bio)]
-          [state-ssl-state-string (SSL_state_string ssl-context)]
-          [state-pending-flush-count (length flushes)]
+
           [shutdown-state (SSL_get_shutdown ssl-context)])
     
-      (log-ssl "ssl-pump (~a): entering loop: clear-port-in:(~v) clear-port-out:(~v) cypher-port-in:(~v) write-bio bytes:(~v) read-bio bytes:(~v) ssl_state:(~v) flushes-pending:(~v) shutdown-state:(~v)"
-               ssl-connection-id
-               state-clear-port-in
-               state-clear-port-out
-               state-cypher-port-in
-               state-bio-write-bytes
-               state-bio-read-bytes
-               state-ssl-state-string
-               state-pending-flush-count
-               shutdown-state)
     
     ;from here we are going to determine what to do next
     ;we operate as a great big state machine depending upon what events occur
@@ -665,22 +661,22 @@
         (write-bytes xfer-buffer cypher-port-out 0 written)
         (flush-output cypher-port-out)
         (log-ssl "ssl-pump (~a): wrote ~v bytes cyphertext to cypher out" ssl-connection-id written))
-      (main-loop flushes connect-channel)]
+      (main-loop flushes shutdowns connect-channel app-input-closed app-output-closed)]
      
      ;if there are any bytes in the read bio that need unencoded
      ;we must perform a read
-     [(when (> state-bio-read-bytes 0))
+     [(when (> (BIO_ctrl_pending read-bio) 0))
       (let* ([ssl-count (SSL_read ssl-context xfer-buffer BUFFER-SIZE)])
         (when (> ssl-count 0)
           ;write the data out and loop
           (write-bytes xfer-buffer clear-port-out 0 ssl-count)
           (flush-output clear-port-out)
           (log-ssl "ssl-pump (~a): wrote ~v bytes to clear-port-out" ssl-connection-id ssl-count)))
-      (main-loop flushes connect-channel)]
+      (main-loop flushes shutdowns connect-channel app-input-closed app-output-closed)]
         
      
      ;has data arrived from the application?
-     [(event (guard-evt (λ () (if (port-closed? clear-port-in) never-evt clear-port-in))))
+     [(event (not-eof-evt clear-port-in))
       ;we peek the bytes off and try to write them
       (let* ([progress (port-progress-evt clear-port-in)]
              [in-count (peek-bytes-avail! xfer-buffer 0 progress clear-port-in)])
@@ -689,8 +685,8 @@
             (begin
               ;if we get an eof, it means the output port
               ;on the clear side was closed by the application
-              (log-ssl "ssl-pump (~a): clear-port-in closed" ssl-connection-id)
-              (close-input-port clear-port-in))
+              (log-ssl "ssl-pump (~a): clear-port-in closed" ssl-connection-id))
+              
             (let ([ssl-count (SSL_write ssl-context xfer-buffer in-count)])
               (log-ssl "ssl-pump (~a): read ~a bytes from clear-port-in" ssl-connection-id in-count)
               ;the write succeeded, we can remove the peeked bytes from clear-port-in
@@ -698,40 +694,57 @@
               (port-commit-peeked ssl-count progress always-evt clear-port-in)
               (log-ssl "ssl-pump (~a): wrote ~a bytes to ssl" ssl-connection-id ssl-count)))
         
-        (main-loop flushes connect-channel))]
+        (main-loop flushes shutdowns connect-channel app-input-closed app-output-closed))]
      
      
      ;any data from the cypher text port?
      ;push it into the BIO
-     [(event cypher-port-in)
+     [(event (not-eof-evt cypher-port-in))
       (let ([in-count (read-bytes-avail! xfer-buffer cypher-port-in)])
-        (if (equal? eof in-count)
-            ;if eof is returned on the input port
-            ;we can never proceed further and halt
-            (log-ssl "ssl-pump (~a): cypher-port-in closed - shutting down" ssl-connection-id)
-            
-            (let ([bio-count (BIO_write read-bio xfer-buffer in-count)])
+        (unless (equal? eof in-count)
+          (let ([bio-count (BIO_write read-bio xfer-buffer in-count)])
               (unless (= in-count bio-count)
                 (error 'input-pump "ssl-pump: Bio write seemed to fail!"))
-              (log-ssl "ssl-pump (~a): read ~a bytes from cypher-port-in" ssl-connection-id in-count)
-              (main-loop flushes connect-channel))))]
+            (log-ssl "ssl-pump (~a): read ~a bytes from cypher-port-in" ssl-connection-id in-count))))
+      (main-loop flushes shutdowns connect-channel app-input-closed app-output-closed)]
         
      
      
      ;we can halt if the ssl shutdown has been performed completely
-     [(when (or (and (> (bitwise-and SSL_SENT_SHUTDOWN shutdown-state) 0)
+     ;or if our cypher ports have been closed
+     [(when (or (and (byte-ready? cypher-port-in)                  
+                     (equal? (peek-byte cypher-port-in) eof))
+                (and (> (bitwise-and SSL_SENT_SHUTDOWN shutdown-state) 0)
                      (> (bitwise-and SSL_RECEIVED_SHUTDOWN shutdown-state) 0)
-                     (= state-bio-write-bytes 0)
-                     (= state-bio-read-bytes 0))))
-        (log-ssl "ssl-pump (~a): shutting down" ssl-connection-id)]
+                     (= state-bio-write-bytes 0))))
+      
+      
+
+      (log-ssl "ssl-pump (~a): ssl shutdown" ssl-connection-id)
+      
+      
+      ;clean up and close down
+      (when close-original? 
+        (close-input-port cypher-port-in)
+        (close-output-port cypher-port-out)
+        (log-ssl "ssl-pump (~a): closed original ports" ssl-connection-id))
+      
+      (close-input-port clear-port-in)
+      (close-output-port clear-port-out)
+      
+      (for-each (λ (shutdown-channel)
+                  (channel-put shutdown-channel 'ok))
+                shutdowns)
+      (log-ssl "ssl-pump (~a): halted" ssl-connection-id)]
+      
      
      ;when both application ports are closed
      ;we can initiate an ssl shutdown sequence
      ;or if we have received a shutdown notification
      ;we call SSL_shutdown and exit
      [(when (or (> (bitwise-and shutdown-state SSL_RECEIVED_SHUTDOWN) 0)
-                (and (port-closed? clear-port-in)
-                     (port-closed? clear-port-out)
+                (and app-input-closed
+                     app-output-closed
                      (= (bitwise-and shutdown-state SSL_SENT_SHUTDOWN) 0))))
       (let ([result (SSL_shutdown ssl-context)])
         (log-ssl "ssl-pump (~a): ssl-shudown result ~v" ssl-connection-id result)
@@ -741,14 +754,14 @@
                (log-ssl "ssl-pump (~a): ssl shutdown pending" ssl-connection-id)]
               [else
                (log-ssl "ssl-pump (~a): ssl shutdown not finished" ssl-connection-id)]))
-      (main-loop flushes connect-channel)]
+      (main-loop flushes shutdowns connect-channel app-input-closed app-output-closed)]
      
      ;when ssl goes SSL_OK
      ;we can now notify the thread waiting on us to completed the connection
      [(when (and connect-channel (equal? (SSL_state ssl-context) SSL_OK)))
       (log-ssl "ssl-pump (~a): sent connection ok to waiting connect" ssl-connection-id)
       (channel-put connect-channel 'ok)
-      (main-loop flushes #f)]
+      (main-loop flushes shutdowns #f app-input-closed app-output-closed)]
      
      
      ;notify any threads waiting for a flush that all data has been committed
@@ -761,33 +774,44 @@
                   (log-ssl "ssl-pump (~a): sent 'ok to flush channel ~v" ssl-connection-id flush-channel))
                 flushes)
       (log-ssl "ssl-pump (~a): flush completed" ssl-connection-id)
-      (main-loop empty connect-channel)]
+      (main-loop empty shutdowns connect-channel app-input-closed app-output-closed)]
      
      
-     ['input-port-closed
-      ;since the application closed its input port, we will no longer
-      ;be able to send anything to it, we can close our output port
-      (close-output-port clear-port-out)
+     [(cons 'input-port-closed input-port-channel)
       (log-ssl "ssl-pump (~a): received message: input-port-closed" ssl-connection-id)
-      (main-loop flushes connect-channel)]
+      
+      (main-loop flushes
+                 (if app-output-closed
+                     (cons input-port-channel shutdowns)
+                     (begin
+                       (channel-put input-port-channel 'ok)
+                       shutdowns))
+                 connect-channel
+                 #t
+                 app-output-closed)]
+      
+     
+     [(cons 'output-port-closed output-port-channel)
+      (log-ssl "ssl-pump (~a): received message: output-port-closed" ssl-connection-id)
+      
+      (main-loop flushes
+                 (if app-input-closed
+                     (cons output-port-channel shutdowns)
+                     (begin
+                       (channel-put output-port-channel 'ok)
+                       shutdowns))
+                 connect-channel 
+                 app-input-closed 
+                 #t)]
      
      [(cons 'flush flush-channel)
       (log-ssl "ssl-pump (~a): received flush message" ssl-connection-id)
-      (main-loop (cons flush-channel flushes) connect-channel)]
+      (main-loop (cons flush-channel flushes) shutdowns connect-channel app-input-closed app-output-closed)]
      
      [(cons 'connect connect-channel)
       (log-ssl "ssl-pump (~a): receive connect message" ssl-connection-id)
-      (main-loop flushes connect-channel)])))
+      (main-loop flushes shutdowns connect-channel app-input-closed app-output-closed)]))))
   
-  ;clean up and close down
-  (when close-original? 
-    (close-input-port cypher-port-in)
-    (close-output-port cypher-port-out)
-    (log-ssl "ssl-pump (~a): closed original ports" ssl-connection-id))
-  
-  (close-input-port clear-port-in)
-  (close-output-port clear-port-out)
-  (log-ssl "ssl-pump (~a): halted" ssl-connection-id))
   
 
 
@@ -884,6 +908,7 @@
                              (raise exn))])
        (wrap-ports who i o client-context-or-protocol-symbol 'connect #t error/network)))))
 
+
 (define (ssl-connect
          hostname port-k
          [client-context-or-protocol-symbol default-encrypt])
@@ -892,6 +917,7 @@
                   hostname
                   port-k
                   client-context-or-protocol-symbol))
+
 
 (define (ssl-connect/enable-break
          hostname port-k

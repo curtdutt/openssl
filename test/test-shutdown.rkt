@@ -7,117 +7,125 @@
          (planet okcomps/racket-test))
 
 
-;creates an ssl connection
-(define (make-ssl-test-ports server-i-port server-o-port client-i-port client-o-port #:close-original? close-original)
+(define (test-ssl-server clear-i clear-o #:close-original? (close-original #t))
   (define server-context (ssl-make-server-context))
   (ssl-load-private-key! server-context "../test.pem")
   (ssl-load-certificate-chain! server-context "../test.pem")
   
-  (define client-context (ssl-make-client-context))
-  (ssl-load-private-key! client-context "../test.pem")
+  (define-values (i o) (ports->ssl-ports clear-i clear-o #:context server-context #:mode 'accept #:close-original? close-original))
   
-  (define start-thread (current-thread))
-  
-  ;we must allow two threads
-  ;each one waits on the other
-  (thread (λ ()
-            (let-values ([(server-ssl-i-port server-ssl-o-port) (ports->ssl-ports server-i-port server-o-port #:context server-context #:mode 'accept #:close-original? close-original)])
-              (printf "server ready~n")
-              (thread-send start-thread (cons server-ssl-i-port server-ssl-o-port)))))
-  
-  (let-values ([(client-ssl-i-port client-ssl-o-port) (ports->ssl-ports client-i-port client-o-port #:context client-context #:mode 'connect #:close-original? close-original)]
-               [(server-ports) (thread-receive)])
-    (printf "client ready~n")
-    (values (car server-ports)
-            (cdr server-ports)
-            client-ssl-i-port
-            client-ssl-o-port)))
+  (let loop ([next (read i)])
+    (printf "server read ~v~n" next)
+    (cond [(or (equal? next eof)
+               (equal? next "shutdown"))
+           (close-input-port i)
+           (close-output-port o)]
+          
+          [else
+           (write next o)
+           (flush-output o)
+           (loop (read i))])))
 
 
 (ssl-enable-verbose-logging #t)
 
 (define-unit-test connection-test
-  (let-values ([(i1 o1) (make-pipe)]
-               [(i2 o2) (make-pipe)])
-    (let-values ([(server-i server-o client-i client-o) (make-ssl-test-ports i1 o2 i2 o1 #:close-original? #t)])
+    
+  (define client-context (ssl-make-client-context))
+  (ssl-load-private-key! client-context "../test.pem")
+  
+  (let*-values ([(i1 o1) (make-pipe)]
+                [(i2 o2) (make-pipe)]
+                [(server-thd) (thread (λ () (test-ssl-server i1 o2)))]
+                [(client-i client-o) (ports->ssl-ports i2 o1 #:context client-context #:mode 'connect #:close-original? #t)])
+    
+    (printf "writing hi~n")
+    (write "hi" client-o)
+    (close-output-port client-o)
+    
+    
+    (let ([in (read client-i)])
+      (printf "read ~v on client input~n" in)
+      (check-equal? in "hi"))
+    
+    
+    
+    (close-input-port client-i)
+    
+    (thread-wait server-thd)))
       
-      (write "hi" client-o)
-      (close-output-port client-o)
-      
-      (printf "wrote hi to server")
-      
-      (let ([in (read server-i)])
-        (printf "read ~v on server side~n" in)
-        (check-equal? in "hi"))
-      (close-input-port server-i)
-      
-      (write "hi" server-o)
-      (printf "wrote \"hi\" on server output~n")
-      (close-output-port server-o)
-      
-      (let ([in (read client-i)])
-        (printf "read ~v on client input~n" in)
-        (check-equal? in "hi"))
-      
-      ;now the read should return EOF
-      ;because shutdown should have completed
-      (printf "port closed? ~v~n" (port-closed? client-i))
-      (let ([in (read client-i)])
-        (printf "read ~v on client input~n" in)
-        (check-equal? eof in))
-      
-      (close-input-port client-i))))
 
-;simple send through and read back test
-(define-unit-test shutdown-close-original
-  (let-values ([(i1 o1) (make-pipe)]
-               [(i2 o2) (make-pipe)])
-    (let-values ([(server-i server-o client-i client-o) (make-ssl-test-ports i1 o2 i2 o1 #:close-original? #t)])
-      
-      (close-output-port server-o)
-      (close-input-port server-i)
-      
-      ;port should be now closed after the shutdown occurs
-      (check-equal? (read client-i) eof)
-      
-      (close-input-port client-i)
-      (close-output-port client-o)
-      
-      (check-true (port-closed? i1))
-      (check-true (port-closed? i2))
-      
-      (check-true (port-closed? o1))
-      (check-true (port-closed? o2)))))
 
 
 ;simple send through and read back test
+;but leave the original ports open
 (define-unit-test shutdown-not-close-original
-  (let-values ([(i1 o1) (make-pipe)]
-               [(i2 o2) (make-pipe)])
-    (let-values ([(server-i server-o client-i client-o) (make-ssl-test-ports i1 o2 i2 o1 #:close-original? #f)])
-      
-      (close-input-port server-i)
-      (close-output-port server-o)
-      
+  (define client-context (ssl-make-client-context))
+  (ssl-load-private-key! client-context "../test.pem")
+  
+  (let*-values ([(i1 o1) (make-pipe)]
+                [(i2 o2) (make-pipe)]
+                [(server-thd) (thread (λ () (test-ssl-server i1 o2 #:close-original? #f)))]
+                [(client-i client-o) (ports->ssl-ports i2 o1 #:context client-context #:mode 'connect #:close-original? #f)])
+    
+    (write "shutdown" client-o)
+    
       ;port should be now closed after the shutdown occurs
-      (check-equal? (read client-i) eof)
+    (check-equal? (read client-i) eof)
       
-      (close-input-port client-i)
-      (close-output-port client-o)
+    (close-input-port client-i)
+    (close-output-port client-o)
+    
+    (thread-wait server-thd)
       
-      (check-false (port-closed? i1))
-      (check-false (port-closed? i2))
+    (check-false (port-closed? i1))
+    (check-false (port-closed? i2))
       
-      (check-false (port-closed? o1))
-      (check-false (port-closed? o2))
+    (check-false (port-closed? o1))
+    (check-false (port-closed? o2))
       
-      ;there should be no garbage information on the underlying ports
-      (check-false (byte-ready? i1))
-      (check-false (byte-ready? i2)))))
+    ;there should be no garbage information on the underlying ports
+    (check-false (byte-ready? i1))
+    (check-false (byte-ready? i2))))
 
-;(connection-test)
-(shutdown-close-original)
-;(shutdown-not-close-original)
+
+#|
+connects to the server, requests the server to shutdown and then
+continues to write to the server. The write operations shold eventually
+throw an exception
+|#
+(define-unit-test shutdown-write-should-fail
+    (define client-context (ssl-make-client-context))
+  (ssl-load-private-key! client-context "../test.pem")
+  
+  (let*-values ([(i1 o1) (make-pipe)]
+                [(i2 o2) (make-pipe)]
+                [(server-thd) (thread (λ () (test-ssl-server i1 o2)))]
+                [(client-i client-o) (ports->ssl-ports i2 o1 #:context client-context #:mode 'connect #:close-original? #t)])
+    
+    (write "shutdown" client-o)
+    
+    (thread-wait server-thd)
+    
+    (check-exn exn:fail:network? (λ ()
+                                   (let loop ()
+                                     (write #"a" client-o)
+                                     (loop))))))
+  
+
+
+
+(map (λ (t)
+         (t))
+       (tests))
+
+
+;situations to check
+;connection is shutdown, read block forever?
+;connection is shutdown, a write should eventually cause errors
+
+
+
 
 #|
 
